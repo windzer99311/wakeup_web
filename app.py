@@ -23,6 +23,11 @@ def load_json(path):
 def save_json(path, data):
     with open(path, "w") as f: json.dump(data, f)
 
+# --- HELPER TO CLEAN NAME ---
+def get_app_name(url):
+    name = url.replace("https://", "").replace("http://", "").replace(".streamlit.app/", "").replace(".streamlit.app", "")
+    return name.strip("/")
+
 # --- BROWSER ENGINE ---
 @st.cache_resource
 def get_driver():
@@ -59,7 +64,7 @@ def bot_worker():
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
             # Update GLOBAL status file so it's visible on refresh
-            save_json(STATUS_FILE, {"state": "Visiting", "detail": target, "last_run": last_run_time})
+            save_json(STATUS_FILE, {"state": "Visiting", "detail": get_app_name(target), "last_run": last_run_time})
             
             try:
                 driver.get(target)
@@ -88,7 +93,7 @@ detail = global_status.get("detail", "Initializing...")
 
 # Display global status (survives refreshes)
 if state == "Visiting":
-    st.info(f"🛰️ **Current Action:** {detail}")
+    st.info(f"🛰️ **Current Action:** Visiting {detail}")
 else:
     st.success(f"💤 **Status:** {detail}")
 
@@ -96,9 +101,26 @@ st.divider()
 
 # Display Statistics Table
 st.subheader("Wake-up Statistics")
-counts = load_json(COUNTS_FILE)
-if counts:
-    st.table([{"URL": k, "Clicks": v} for k, v in counts.items()])
+
+# Filter logic: Only show websites currently in website.txt
+if os.path.exists(WEBSITE_FILE):
+    with open(WEBSITE_FILE, "r") as f:
+        current_urls = [l.strip() for l in f if l.strip()]
+    
+    counts = load_json(COUNTS_FILE)
+    
+    # Create the table using only URLs found in the current file
+    table_data = []
+    for url in current_urls:
+        click_count = counts.get(url, 0)
+        table_data.append({"App Name": get_app_name(url), "Clicks": click_count})
+    
+    if table_data:
+        st.table(table_data)
+    else:
+        st.info("No websites found in website.txt.")
+else:
+    st.error("website.txt not found.")
 
 # Call the fragment
 bot_worker()
