@@ -23,6 +23,11 @@ def load_json(path):
 def save_json(path, data):
     with open(path, "w") as f: json.dump(data, f)
 
+# --- HELPER TO CLEAN NAME FOR STATUS ONLY ---
+def get_app_name(url):
+    name = url
+    return name
+
 # --- BROWSER ENGINE ---
 @st.cache_resource
 def get_driver():
@@ -36,15 +41,12 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 # --- THE BOT FRAGMENT ---
-@st.fragment(run_every=2.0) # Runs the check every 2 seconds
+@st.fragment(run_every=2.0) 
 def bot_worker():
-    # Load global progress from the file
     global_status = load_json(STATUS_FILE)
     last_run_time = global_status.get("last_run", 0)
-    
     current_time = time.time()
     
-    # Run a new cycle every 60 seconds
     if current_time - last_run_time > 60:
         if not os.path.exists(WEBSITE_FILE):
             save_json(STATUS_FILE, {"state": "Error", "detail": "website.txt missing", "last_run": last_run_time})
@@ -58,8 +60,8 @@ def bot_worker():
 
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
-            # Update GLOBAL status file so it's visible on refresh
-            save_json(STATUS_FILE, {"state": "Visiting", "detail": target, "last_run": last_run_time})
+            # Keep status message clean
+            save_json(STATUS_FILE, {"state": "Visiting", "detail": get_app_name(target), "last_run": last_run_time})
             
             try:
                 driver.get(target)
@@ -72,7 +74,6 @@ def bot_worker():
             except:
                 continue
         
-        # Cycle finished: Update the last run time globally
         save_json(STATUS_FILE, {"state": "Waiting", "detail": "Cycle Complete. Resting...", "last_run": current_time})
         st.rerun()
 
@@ -81,24 +82,36 @@ st.set_page_config(page_title="24/7 Awakener", page_icon="🤖")
 
 st.title("🤖 Global Bot Dashboard")
 
-# Load Global Status from File
 global_status = load_json(STATUS_FILE)
 state = global_status.get("state", "Starting")
 detail = global_status.get("detail", "Initializing...")
 
-# Display global status (survives refreshes)
 if state == "Visiting":
-    st.info(f"🛰️ **Current Action:** {detail}")
+    st.info(f"🛰️ **Current Action:** Visiting {detail}")
 else:
     st.success(f"💤 **Status:** {detail}")
 
 st.divider()
 
-# Display Statistics Table
 st.subheader("Wake-up Statistics")
-counts = load_json(COUNTS_FILE)
-if counts:
-    st.table([{"URL": k, "Clicks": v} for k, v in counts.items()])
 
-# Call the fragment
+if os.path.exists(WEBSITE_FILE):
+    with open(WEBSITE_FILE, "r") as f:
+        current_urls = [l.strip() for l in f if l.strip()]
+    
+    counts = load_json(COUNTS_FILE)
+    
+    table_data = []
+    for url in current_urls:
+        click_count = counts.get(url, 0)
+        # Showing the full URL as stored in website.txt
+        table_data.append({"URL": url, "Clicks": click_count})
+    
+    if table_data:
+        st.table(table_data)
+    else:
+        st.info("No websites found in website.txt.")
+else:
+    st.error("website.txt not found.")
+
 bot_worker()
