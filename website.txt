@@ -1,0 +1,2 @@
+https://check-tip.streamlit.app/
+https://test-py.streamlit.app/
