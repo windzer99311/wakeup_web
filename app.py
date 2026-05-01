@@ -39,10 +39,9 @@ def is_bot_running():
     try:
         with open("bot.pid", "r") as f:
             pid = int(f.read().strip())
-        # Check if process is alive
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, ValueError, FileNotFoundError):
+    except (ProcessLookupError, ValueError, FileNotFoundError, PermissionError):
         return False
 
 def start_bot():
@@ -55,20 +54,26 @@ def start_bot():
         f.write(str(proc.pid))
     print(f"[MAIN] Bot started with PID {proc.pid}")
 
-# --- Write bot_runner.py if it doesn't exist ---
 BOT_CODE = '''
 import time
 import os
 import json
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from webdriver_manager.chrome import ChromeDriverManager
+import subprocess
+import sys
 
 COUNTS_FILE = "counts.json"
 STATUS_FILE = "status.json"
 WAIT_SECONDS = 20
+
+def install(pkg):
+    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
+
+def save_status(current_url=None, phase="idle", countdown=0):
+    with open(STATUS_FILE, "w") as f:
+        json.dump({"current_url": current_url, "phase": phase, "countdown": countdown}, f)
+        f.flush()
+        os.fsync(f.fileno())
+    print(f"[BOT] phase={phase} | url={current_url} | countdown={countdown}")
 
 def load_counts():
     try:
@@ -85,13 +90,6 @@ def save_counts(counts):
         f.flush()
         os.fsync(f.fileno())
 
-def save_status(current_url=None, phase="idle", countdown=0):
-    with open(STATUS_FILE, "w") as f:
-        json.dump({"current_url": current_url, "phase": phase, "countdown": countdown}, f)
-        f.flush()
-        os.fsync(f.fileno())
-    print(f"[BOT] phase={phase} | url={current_url} | countdown={countdown}")
-
 def get_urls():
     if not os.path.exists("website.txt"):
         return []
@@ -99,36 +97,32 @@ def get_urls():
         return [line.strip() for line in f if line.strip()]
 
 def main():
-    save_status(phase="installing_driver")
-    print("[BOT] Installing ChromeDriver...")
+    save_status(phase="installing_packages")
 
     try:
-        driver_path = ChromeDriverManager().install()
-        print(f"[BOT] Driver: {driver_path}")
+        install("undetected-chromedriver")
+        import undetected_chromedriver as uc
         save_status(phase="launching_chrome")
     except Exception as e:
-        save_status(phase=f"driver_failed: {str(e)[:80]}")
+        save_status(phase=f"install_failed: {str(e)[:80]}")
         return
 
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-
     try:
-        driver = webdriver.Chrome(service=Service(driver_path), options=options)
-        print("[BOT] Chrome ready")
+        options = uc.ChromeOptions()
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        driver = uc.Chrome(options=options)
+        print("[BOT] Chrome launched OK")
         save_status(phase="chrome_ready")
     except Exception as e:
         save_status(phase=f"chrome_failed: {str(e)[:80]}")
         return
 
     try:
+        from selenium.webdriver.common.by import By
+
         while True:
             urls = get_urls()
             if not urls:
@@ -184,19 +178,25 @@ def main():
         print(f"[BOT] Crashed: {e}")
         save_status(phase=f"crashed: {str(e)[:80]}")
     finally:
-        driver.quit()
+        try:
+            driver.quit()
+        except:
+            pass
 
 if __name__ == "__main__":
     main()
 '''
 
-# Write bot_runner.py to disk on first run
-if not os.path.exists(BOT_FILE):
-    with open(BOT_FILE, "w") as f:
-        f.write(BOT_CODE)
-    print("[MAIN] Wrote bot_runner.py")
+# Always rewrite bot_runner.py to pick up changes
+with open(BOT_FILE, "w") as f:
+    f.write(BOT_CODE)
 
-# Start bot process if not already running
+# Kill stale pid and restart if chrome_failed
+status = load_status()
+if any(x in status.get("phase","") for x in ["chrome_failed", "crashed", "failed"]):
+    if os.path.exists("bot.pid"):
+        os.remove("bot.pid")
+
 if not is_bot_running():
     start_bot()
 
@@ -215,7 +215,6 @@ countdown = status.get("countdown", 0)
 
 st.caption(f"🔧 phase: `{phase}` | bot running: `{is_bot_running()}`")
 
-# --- Status Banner ---
 if phase == "visiting":
     st.info(f"🔍 Visiting: **{current_url}**")
 elif phase == "clicked":
@@ -228,14 +227,12 @@ elif phase == "cycle_start":
     st.info("🔄 Starting new cycle...")
 elif phase == "no_urls":
     st.warning("⚠️ website.txt is empty or missing.")
-elif phase == "installing_driver":
-    st.info("📦 Installing ChromeDriver...")
+elif phase == "installing_packages":
+    st.info("📦 Installing packages...")
 elif phase == "launching_chrome":
     st.info("🌐 Launching Chrome...")
 elif phase == "chrome_ready":
     st.info("✅ Chrome ready, first cycle starting...")
-elif phase == "starting":
-    st.info("🚀 Bot starting...")
 elif any(x in phase for x in ["failed", "crashed", "error"]):
     st.error(f"❌ {phase}")
 else:
