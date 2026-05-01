@@ -8,9 +8,10 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
 # --- CONFIG ---
+# These files act as global memory so data persists across refreshes
 COUNTS_FILE = "counts.json"
 WEBSITE_FILE = "website.txt"
-STATUS_FILE = "status.json" # Global status memory
+STATUS_FILE = "status.json" 
 
 # --- PERSISTENCE ---
 def load_json(path):
@@ -25,8 +26,7 @@ def save_json(path, data):
 
 # --- HELPER TO CLEAN NAME FOR STATUS ONLY ---
 def get_app_name(url):
-    name = url
-    return name
+    return url
 
 # --- BROWSER ENGINE ---
 @st.cache_resource
@@ -40,6 +40,43 @@ def get_driver():
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=options)
 
+# --- UI REFRESHER FRAGMENT ---
+# This fragment specifically updates the UI status and table in real-time
+@st.fragment(run_every=3.0)
+def ui_refresher():
+    # 1. Load and Display Global Status
+    global_status = load_json(STATUS_FILE)
+    state = global_status.get("state", "Starting")
+    detail = global_status.get("detail", "Initializing...")
+
+    status_container = st.empty()
+    if state == "Visiting":
+        status_container.info(f"🛰️ **Current Action:** Visiting {detail}")
+    else:
+        status_container.success(f"💤 **Status:** {detail}")
+
+    st.divider()
+
+    # 2. Display Statistics Table
+    st.subheader("Wake-up Statistics")
+    if os.path.exists(WEBSITE_FILE):
+        with open(WEBSITE_FILE, "r") as f:
+            current_urls = [l.strip() for l in f if l.strip()]
+        
+        counts = load_json(COUNTS_FILE)
+        
+        table_data = []
+        for url in current_urls:
+            click_count = counts.get(url, 0)
+            table_data.append({"URL": url, "Clicks": click_count})
+        
+        if table_data:
+            st.table(table_data)
+        else:
+            st.info("No websites found in website.txt.")
+    else:
+        st.error("website.txt not found.")
+
 # --- THE BOT FRAGMENT ---
 @st.fragment(run_every=2.0) 
 def bot_worker():
@@ -47,6 +84,7 @@ def bot_worker():
     last_run_time = global_status.get("last_run", 0)
     current_time = time.time()
     
+    # Run a new cycle every 60 seconds
     if current_time - last_run_time > 60:
         if not os.path.exists(WEBSITE_FILE):
             save_json(STATUS_FILE, {"state": "Error", "detail": "website.txt missing", "last_run": last_run_time})
@@ -60,7 +98,7 @@ def bot_worker():
 
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
-            # Keep status message clean
+            # Update global file so the UI fragment sees it immediately
             save_json(STATUS_FILE, {"state": "Visiting", "detail": get_app_name(target), "last_run": last_run_time})
             
             try:
@@ -77,41 +115,12 @@ def bot_worker():
         save_json(STATUS_FILE, {"state": "Waiting", "detail": "Cycle Complete. Resting...", "last_run": current_time})
         st.rerun()
 
-# --- MAIN UI ---
+# --- MAIN PAGE LAYOUT ---
 st.set_page_config(page_title="24/7 Awakener", page_icon="🤖")
-
 st.title("🤖 Global Bot Dashboard")
 
-global_status = load_json(STATUS_FILE)
-state = global_status.get("state", "Starting")
-detail = global_status.get("detail", "Initializing...")
+# Launch the UI refresher (Status & Table)
+ui_refresher()
 
-if state == "Visiting":
-    st.info(f"🛰️ **Current Action:** Visiting {detail}")
-else:
-    st.success(f"💤 **Status:** {detail}")
-
-st.divider()
-
-st.subheader("Wake-up Statistics")
-
-if os.path.exists(WEBSITE_FILE):
-    with open(WEBSITE_FILE, "r") as f:
-        current_urls = [l.strip() for l in f if l.strip()]
-    
-    counts = load_json(COUNTS_FILE)
-    
-    table_data = []
-    for url in current_urls:
-        click_count = counts.get(url, 0)
-        # Showing the full URL as stored in website.txt
-        table_data.append({"URL": url, "Clicks": click_count})
-    
-    if table_data:
-        st.table(table_data)
-    else:
-        st.info("No websites found in website.txt.")
-else:
-    st.error("website.txt not found.")
-
+# Launch the Bot logic (Browser work)
 bot_worker()
