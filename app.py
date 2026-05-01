@@ -25,8 +25,8 @@ def save_json(path, data):
 
 # --- HELPER TO CLEAN NAME ---
 def get_app_name(url):
-    name = url.replace("https://", "").replace("http://", "").replace(".streamlit.app/", "").replace(".streamlit.app", "")
-    return name.strip("/")
+    name = url
+    return name
 
 # --- BROWSER ENGINE ---
 @st.cache_resource
