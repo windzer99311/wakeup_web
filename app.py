@@ -17,15 +17,15 @@ STATUS_FILE = "status.json"
 def load_json(path):
     if os.path.exists(path):
         try: 
-            with open(path, "r") as f: return json.load(f)
+            with open(path, "r") as f: 
+                data = json.load(f)
+                return data
         except: return {}
     return {}
 
 def save_json(path, data):
-    with open(path, "w") as f: json.dump(data, f)
-
-def get_app_name(url):
-    return url
+    with open(path, "w") as f: 
+        json.dump(data, f)
 
 # --- BROWSER ENGINE ---
 @st.cache_resource
@@ -42,16 +42,16 @@ def get_driver():
 # --- THE BOT FRAGMENT ---
 @st.fragment(run_every=2.0) 
 def bot_worker():
+    # Load fresh status every 2 seconds
     global_status = load_json(STATUS_FILE)
     
-    # 'next_run_at' represents your 'b' variable
-    next_run_at = global_status.get("next_run_at", 0)
+    # 'b' value from your logic
+    next_run_at = float(global_status.get("next_run_at", 0))
     current_time = time.time()
     
-    # Logic: if current time > b, then start the loop
+    # Check: Is it time to start the loop? (current time > b)
     if current_time >= next_run_at:
         if not os.path.exists(WEBSITE_FILE):
-            save_json(STATUS_FILE, {"state": "Error", "detail": "website.txt missing", "next_run_at": next_run_at})
             return
 
         with open(WEBSITE_FILE, "r") as f:
@@ -60,14 +60,18 @@ def bot_worker():
         driver = get_driver()
         counts = load_json(COUNTS_FILE)
 
-        # Start processing all webs
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
-            save_json(STATUS_FILE, {"state": "Visiting", "detail": get_app_name(target), "next_run_at": next_run_at})
+            # Update status to show trace
+            save_json(STATUS_FILE, {
+                "state": "Visiting", 
+                "detail": target, 
+                "next_run_at": next_run_at 
+            })
             
             try:
                 driver.get(target)
-                time.sleep(5)
+                time.sleep(5) # Wait for page load
                 btn = driver.find_elements(By.XPATH, "//button[contains(., 'Yes, get this app back up!')]")
                 if btn:
                     driver.execute_script("arguments[0].click();", btn[0])
@@ -76,20 +80,24 @@ def bot_worker():
             except:
                 continue
         
-        # ALL WEBS VISITED: Note the time and update b = current + 60
-        new_b = time.time() + 60
+        # --- END OF LOOP LOGIC ---
+        # Note the finish time and add 60 seconds
+        finished_at = time.time()
+        new_b = finished_at + 60 
+        
         save_json(STATUS_FILE, {
             "state": "Waiting", 
-            "detail": f"Resting. Next cycle at {time.strftime('%H:%M:%S', time.localtime(new_b))}", 
+            "detail": f"Resting until {time.strftime('%H:%M:%S', time.localtime(new_b))}", 
             "next_run_at": new_b
         })
+        # Force the UI to update immediately after the loop
         st.rerun()
 
 # --- MAIN UI ---
 st.set_page_config(page_title="24/7 Awakener", page_icon="🤖")
 
-# Auto-refresh UI every 5 seconds to trace the status
-st_autorefresh(interval=5000, key="datarefresh")
+# Keep the UI alive and tracing the status
+st_autorefresh(interval=5000, key="ui_refresh")
 
 st.title("🤖 Global Bot Dashboard")
 
@@ -105,23 +113,11 @@ else:
 st.divider()
 
 st.subheader("Wake-up Statistics")
-
 if os.path.exists(WEBSITE_FILE):
     with open(WEBSITE_FILE, "r") as f:
         current_urls = [l.strip() for l in f if l.strip()]
-    
     counts = load_json(COUNTS_FILE)
-    
-    table_data = []
-    for url in current_urls:
-        click_count = counts.get(url, 0)
-        table_data.append({"URL": url, "Clicks": click_count})
-    
-    if table_data:
-        st.table(table_data)
-    else:
-        st.info("No websites found in website.txt.")
-else:
-    st.error("website.txt not found.")
+    table_data = [{"URL": url, "Clicks": counts.get(url, 0)} for url in current_urls]
+    st.table(table_data)
 
 bot_worker()
