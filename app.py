@@ -41,7 +41,7 @@ def is_bot_running():
             pid = int(f.read().strip())
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, ValueError, FileNotFoundError, PermissionError):
+    except:
         return False
 
 def start_bot():
@@ -58,15 +58,13 @@ BOT_CODE = '''
 import time
 import os
 import json
+import re
 import subprocess
 import sys
 
 COUNTS_FILE = "counts.json"
 STATUS_FILE = "status.json"
 WAIT_SECONDS = 20
-
-def install(pkg):
-    subprocess.check_call([sys.executable, "-m", "pip", "install", pkg, "-q"])
 
 def save_status(current_url=None, phase="idle", countdown=0):
     with open(STATUS_FILE, "w") as f:
@@ -96,24 +94,71 @@ def get_urls():
     with open("website.txt", "r") as f:
         return [line.strip() for line in f if line.strip()]
 
+def get_chrome_version():
+    """Detect installed Chrome major version."""
+    cmds = [
+        ["google-chrome", "--version"],
+        ["google-chrome-stable", "--version"],
+        ["chromium-browser", "--version"],
+        ["chromium", "--version"],
+        ["/usr/bin/google-chrome", "--version"],
+        ["/usr/bin/chromium-browser", "--version"],
+    ]
+    for cmd in cmds:
+        try:
+            out = subprocess.check_output(cmd, stderr=subprocess.DEVNULL).decode()
+            match = re.search(r"(\\d+)\\.\\d+\\.\\d+\\.\\d+", out)
+            if match:
+                version = int(match.group(1))
+                print(f"[BOT] Detected Chrome version: {version} via {cmd[0]}")
+                return version
+        except:
+            continue
+    print("[BOT] Could not detect Chrome version, using default")
+    return None
+
 def main():
-    save_status(phase="installing_packages")
+    save_status(phase="detecting_chrome")
+
+    chrome_version = get_chrome_version()
+
+    save_status(phase="installing_driver")
 
     try:
-        install("undetected-chromedriver")
-        import undetected_chromedriver as uc
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from webdriver_manager.chrome import ChromeDriverManager
+        from webdriver_manager.core.os_manager import ChromeType
+
+        if chrome_version:
+            driver_path = ChromeDriverManager(driver_version=str(chrome_version)).install()
+        else:
+            driver_path = ChromeDriverManager().install()
+
+        print(f"[BOT] ChromeDriver installed at: {driver_path}")
         save_status(phase="launching_chrome")
+
     except Exception as e:
-        save_status(phase=f"install_failed: {str(e)[:80]}")
+        save_status(phase=f"driver_failed: {str(e)[:80]}")
         return
 
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
     try:
-        options = uc.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        driver = uc.Chrome(options=options)
+        from selenium import webdriver
+        from selenium.webdriver.chrome.service import Service
+        driver = webdriver.Chrome(service=Service(driver_path), options=options)
         print("[BOT] Chrome launched OK")
         save_status(phase="chrome_ready")
     except Exception as e:
@@ -187,13 +232,13 @@ if __name__ == "__main__":
     main()
 '''
 
-# Always rewrite bot_runner.py to pick up changes
+# Always rewrite bot_runner.py
 with open(BOT_FILE, "w") as f:
     f.write(BOT_CODE)
 
-# Kill stale pid and restart if chrome_failed
+# Auto-restart if previously failed
 status = load_status()
-if any(x in status.get("phase","") for x in ["chrome_failed", "crashed", "failed"]):
+if any(x in status.get("phase", "") for x in ["failed", "crashed", "chrome_failed"]):
     if os.path.exists("bot.pid"):
         os.remove("bot.pid")
 
@@ -227,12 +272,14 @@ elif phase == "cycle_start":
     st.info("🔄 Starting new cycle...")
 elif phase == "no_urls":
     st.warning("⚠️ website.txt is empty or missing.")
-elif phase == "installing_packages":
-    st.info("📦 Installing packages...")
+elif phase == "detecting_chrome":
+    st.info("🔍 Detecting Chrome version...")
+elif phase == "installing_driver":
+    st.info("📦 Installing matching ChromeDriver...")
 elif phase == "launching_chrome":
     st.info("🌐 Launching Chrome...")
 elif phase == "chrome_ready":
-    st.info("✅ Chrome ready, first cycle starting...")
+    st.info("✅ Chrome ready, starting first cycle...")
 elif any(x in phase for x in ["failed", "crashed", "error"]):
     st.error(f"❌ {phase}")
 else:
