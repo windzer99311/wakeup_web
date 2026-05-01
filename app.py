@@ -8,9 +8,9 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
 # --- CONFIG ---
-# Using json files to ensure data persists across sessions
 COUNTS_FILE = "counts.json"
 WEBSITE_FILE = "website.txt"
+STATUS_FILE = "status.json" # Global status memory
 
 # --- PERSISTENCE ---
 def load_json(path):
@@ -26,7 +26,6 @@ def save_json(path, data):
 # --- BROWSER ENGINE ---
 @st.cache_resource
 def get_driver():
-    # Setup for Chromium on Streamlit Cloud
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -37,18 +36,18 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 # --- THE BOT FRAGMENT ---
-# Changed from experimental_fragment to fragment to fix the AttributeError
-@st.fragment(run_every=1.0)
+@st.fragment(run_every=2.0) # Runs the check every 2 seconds
 def bot_worker():
-    if "last_run" not in st.session_state:
-        st.session_state.last_run = 0
+    # Load global progress from the file
+    global_status = load_json(STATUS_FILE)
+    last_run_time = global_status.get("last_run", 0)
     
     current_time = time.time()
     
-    # Logic runs independently of the main UI
-    if current_time - st.session_state.last_run > 60:
+    # Run a new cycle every 60 seconds
+    if current_time - last_run_time > 60:
         if not os.path.exists(WEBSITE_FILE):
-            st.session_state.status = "Error: website.txt missing"
+            save_json(STATUS_FILE, {"state": "Error", "detail": "website.txt missing", "last_run": last_run_time})
             return
 
         with open(WEBSITE_FILE, "r") as f:
@@ -59,13 +58,12 @@ def bot_worker():
 
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
-            # Updating status dynamically for the user
-            st.session_state.status = f"🛰️ Visiting: {target}"
+            # Update GLOBAL status file so it's visible on refresh
+            save_json(STATUS_FILE, {"state": "Visiting", "detail": target, "last_run": last_run_time})
             
             try:
                 driver.get(target)
                 time.sleep(5)
-                # Locating the specific Streamlit wake-up button
                 btn = driver.find_elements(By.XPATH, "//button[contains(., 'Yes, get this app back up!')]")
                 if btn:
                     driver.execute_script("arguments[0].click();", btn[0])
@@ -74,23 +72,25 @@ def bot_worker():
             except:
                 continue
         
-        st.session_state.last_run = current_time
-        st.session_state.status = "💤 Cycle Complete. Waiting..."
+        # Cycle finished: Update the last run time globally
+        save_json(STATUS_FILE, {"state": "Waiting", "detail": "Cycle Complete. Resting...", "last_run": current_time})
         st.rerun()
 
 # --- MAIN UI ---
 st.set_page_config(page_title="24/7 Awakener", page_icon="🤖")
 
-if "status" not in st.session_state:
-    st.session_state.status = "Initializing..."
+st.title("🤖 Global Bot Dashboard")
 
-st.title("🤖 Live Bot Status")
+# Load Global Status from File
+global_status = load_json(STATUS_FILE)
+state = global_status.get("state", "Starting")
+detail = global_status.get("detail", "Initializing...")
 
-# Display persistent status
-if "Visiting" in st.session_state.status:
-    st.info(st.session_state.status)
+# Display global status (survives refreshes)
+if state == "Visiting":
+    st.info(f"🛰️ **Current Action:** {detail}")
 else:
-    st.success(st.session_state.status)
+    st.success(f"💤 **Status:** {detail}")
 
 st.divider()
 
@@ -100,5 +100,5 @@ counts = load_json(COUNTS_FILE)
 if counts:
     st.table([{"URL": k, "Clicks": v} for k, v in counts.items()])
 
-# Start the worker
+# Call the fragment
 bot_worker()
