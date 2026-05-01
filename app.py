@@ -8,13 +8,14 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
 # --- CONFIG ---
+# Using json files to ensure data persists across sessions
 COUNTS_FILE = "counts.json"
 WEBSITE_FILE = "website.txt"
 
 # --- PERSISTENCE ---
 def load_json(path):
     if os.path.exists(path):
-        try:
+        try: 
             with open(path, "r") as f: return json.load(f)
         except: return {}
     return {}
@@ -25,6 +26,7 @@ def save_json(path, data):
 # --- BROWSER ENGINE ---
 @st.cache_resource
 def get_driver():
+    # Setup for Chromium on Streamlit Cloud
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -35,15 +37,15 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 # --- THE BOT FRAGMENT ---
-@st.experimental_fragment(run_every=1.0)
+# Changed from experimental_fragment to fragment to fix the AttributeError
+@st.fragment(run_every=1.0)
 def bot_worker():
-    # Check if we should run the next cycle
     if "last_run" not in st.session_state:
         st.session_state.last_run = 0
     
     current_time = time.time()
     
-    # Run every 60 seconds
+    # Logic runs independently of the main UI
     if current_time - st.session_state.last_run > 60:
         if not os.path.exists(WEBSITE_FILE):
             st.session_state.status = "Error: website.txt missing"
@@ -57,11 +59,13 @@ def bot_worker():
 
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
+            # Updating status dynamically for the user
             st.session_state.status = f"🛰️ Visiting: {target}"
             
             try:
                 driver.get(target)
                 time.sleep(5)
+                # Locating the specific Streamlit wake-up button
                 btn = driver.find_elements(By.XPATH, "//button[contains(., 'Yes, get this app back up!')]")
                 if btn:
                     driver.execute_script("arguments[0].click();", btn[0])
@@ -82,7 +86,7 @@ if "status" not in st.session_state:
 
 st.title("🤖 Live Bot Status")
 
-# Display Status
+# Display persistent status
 if "Visiting" in st.session_state.status:
     st.info(st.session_state.status)
 else:
@@ -90,11 +94,11 @@ else:
 
 st.divider()
 
-# Display Table
+# Display Statistics Table
 st.subheader("Wake-up Statistics")
 counts = load_json(COUNTS_FILE)
 if counts:
     st.table([{"URL": k, "Clicks": v} for k, v in counts.items()])
 
-# Start the worker fragment
+# Start the worker
 bot_worker()
