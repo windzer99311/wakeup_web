@@ -1,4 +1,5 @@
 import streamlit as st
+import threading
 import time
 import os
 import json
@@ -6,118 +7,115 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from streamlit_autorefresh import st_autorefresh
+from webdriver_manager.chrome import ChromeDriverManager
 
-# --- CONFIG ---
 COUNTS_FILE = "counts.json"
-WEBSITE_FILE = "website.txt"
-STATUS_FILE = "status.json"
+LOCK = threading.Lock()
 
-# --- PERSISTENCE ---
-def load_json(path):
-    if os.path.exists(path):
-        try: 
-            with open(path, "r") as f: 
-                data = json.load(f)
-                return data
-        except: return {}
+def load_counts():
+    if os.path.exists(COUNTS_FILE):
+        with open(COUNTS_FILE, "r") as f:
+            return json.load(f)
     return {}
 
-def save_json(path, data):
-    with open(path, "w") as f: 
-        json.dump(data, f)
+def save_counts(counts):
+    with open(COUNTS_FILE, "w") as f:
+        json.dump(counts, f)
 
-# --- BROWSER ENGINE ---
-@st.cache_resource
-def get_driver():
+def get_urls():
+    if not os.path.exists("website.txt"):
+        return []
+    with open("website.txt", "r") as f:
+        return [line.strip() for line in f if line.strip()]
+
+def bot_worker():
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.binary_location = "/usr/bin/chromium"
-    service = Service("/usr/bin/chromedriver")
-    return webdriver.Chrome(service=service, options=options)
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
 
-# --- THE BOT FRAGMENT ---
-@st.fragment(run_every=2.0) 
-def bot_worker():
-    # Load fresh status every 2 seconds
-    global_status = load_json(STATUS_FILE)
-    
-    # 'b' value from your logic
-    next_run_at = float(global_status.get("next_run_at", 0))
-    current_time = time.time()
-    
-    # Check: Is it time to start the loop? (current time > b)
-    if current_time >= next_run_at:
-        if not os.path.exists(WEBSITE_FILE):
-            return
+    driver = webdriver.Chrome(
+        service=Service(ChromeDriverManager().install()), options=options
+    )
 
-        with open(WEBSITE_FILE, "r") as f:
-            urls = [l.strip() for l in f if l.strip()]
-
-        driver = get_driver()
-        counts = load_json(COUNTS_FILE)
-
-        for url in urls:
-            target = url if url.startswith("http") else f"https://{url}"
-            # Update status to show trace
-            save_json(STATUS_FILE, {
-                "state": "Visiting", 
-                "detail": target, 
-                "next_run_at": next_run_at 
-            })
-            
-            try:
-                driver.get(target)
-                time.sleep(5) # Wait for page load
-                btn = driver.find_elements(By.XPATH, "//button[contains(., 'Yes, get this app back up!')]")
-                if btn:
-                    driver.execute_script("arguments[0].click();", btn[0])
-                    counts[url] = counts.get(url, 0) + 1
-                    save_json(COUNTS_FILE, counts)
-            except:
+    try:
+        while True:
+            urls = get_urls()
+            if not urls:
+                time.sleep(5)
                 continue
-        
-        # --- END OF LOOP LOGIC ---
-        # Note the finish time and add 60 seconds
-        finished_at = time.time()
-        new_b = finished_at + 60 
-        
-        save_json(STATUS_FILE, {
-            "state": "Waiting", 
-            "detail": f"Resting until {time.strftime('%H:%M:%S', time.localtime(new_b))}", 
-            "next_run_at": new_b
-        })
-        # Force the UI to update immediately after the loop
-        st.rerun()
 
-# --- MAIN UI ---
-st.set_page_config(page_title="24/7 Awakener", page_icon="🤖")
+            for url in urls:
+                full_url = url if url.startswith("http") else f"https://{url}"
+                try:
+                    driver.get(full_url)
+                    time.sleep(3)
 
-# Keep the UI alive and tracing the status
-st_autorefresh(interval=5000, key="ui_refresh")
+                    wake_button = driver.find_elements(
+                        By.XPATH, "//button[contains(., 'Yes, get this app back up!')]"
+                    )
 
-st.title("🤖 Global Bot Dashboard")
+                    with LOCK:
+                        counts = load_counts()
+                        if url not in counts:
+                            counts[url] = 0
+                        if wake_button:
+                            driver.execute_script("arguments[0].click();", wake_button[0])
+                            counts[url] += 1
+                        save_counts(counts)
 
-global_status = load_json(STATUS_FILE)
-state = global_status.get("state", "Starting")
-detail = global_status.get("detail", "Initializing...")
+                except Exception as e:
+                    print(f"Error on {url}: {e}")
 
-if state == "Visiting":
-    st.info(f"🛰️ **Current Action:** Visiting {detail}")
+            time.sleep(10)
+    except Exception as e:
+        print(f"Bot thread crashed: {e}")
+    finally:
+        driver.quit()
+
+# --- Start background thread only once ---
+if "bot_started" not in st.session_state:
+    st.session_state.bot_started = True
+    t = threading.Thread(target=bot_worker, daemon=True)
+    t.start()
+
+# --- UI ---
+st.set_page_config(page_title="Auto-Awakener Dashboard", page_icon="⚡", layout="centered")
+st.title("⚡ Auto-Awakener Status Dashboard")
+st.caption("Read-only dashboard. Refreshes every 5 seconds.")
+
+urls = get_urls()
+
+if not urls:
+    st.warning("⚠️ `website.txt` is missing or empty.")
 else:
-    st.success(f"💤 **Status:** {detail}")
+    with LOCK:
+        counts = load_counts()
 
-st.divider()
+    rows = []
+    for url in urls:
+        rows.append({
+            "Website": url,
+            "Wake-up Clicks": counts.get(url, 0)
+        })
 
-st.subheader("Wake-up Statistics")
-if os.path.exists(WEBSITE_FILE):
-    with open(WEBSITE_FILE, "r") as f:
-        current_urls = [l.strip() for l in f if l.strip()]
-    counts = load_json(COUNTS_FILE)
-    table_data = [{"URL": url, "Clicks": counts.get(url, 0)} for url in current_urls]
-    st.table(table_data)
+    st.dataframe(
+        rows,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Website": st.column_config.TextColumn("🌐 Website", width="large"),
+            "Wake-up Clicks": st.column_config.NumberColumn("🖱️ Wake-up Clicks", width="small"),
+        }
+    )
 
-bot_worker()
+    total = sum(r["Wake-up Clicks"] for r in rows)
+    st.metric("Total Wake-up Clicks", total)
+
+time.sleep(5)
+st.rerun()
