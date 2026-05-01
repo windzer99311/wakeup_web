@@ -12,7 +12,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 COUNTS_FILE = "counts.json"
 STATUS_FILE = "status.json"
 
-# Global thread guard - lives in process memory, not session state
 _bot_thread = None
 _bot_lock = threading.Lock()
 
@@ -26,8 +25,13 @@ def load_counts():
     return {}
 
 def save_counts(counts):
-    with open(COUNTS_FILE, "w") as f:
-        json.dump(counts, f)
+    try:
+        with open(COUNTS_FILE, "w") as f:
+            json.dump(counts, f)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        print(f"[SAVE_COUNTS ERROR] {e}")
 
 def load_status():
     try:
@@ -39,8 +43,14 @@ def load_status():
     return {"current_url": None, "phase": "starting", "countdown": 0}
 
 def save_status(current_url=None, phase="idle", countdown=0):
-    with open(STATUS_FILE, "w") as f:
-        json.dump({"current_url": current_url, "phase": phase, "countdown": countdown}, f)
+    try:
+        with open(STATUS_FILE, "w") as f:
+            json.dump({"current_url": current_url, "phase": phase, "countdown": countdown}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        print(f"[STATUS] phase={phase} url={current_url} countdown={countdown}")
+    except Exception as e:
+        print(f"[SAVE_STATUS ERROR] {e}")
 
 def get_urls():
     if not os.path.exists("website.txt"):
@@ -49,8 +59,20 @@ def get_urls():
         return [line.strip() for line in f if line.strip()]
 
 def bot_worker():
-    print("[BOT] Thread started")
-    save_status(phase="starting")
+    print("[BOT] ===== Thread entered =====")
+    save_status(phase="thread_alive")
+
+    print("[BOT] Installing ChromeDriver...")
+    save_status(phase="installing_driver")
+
+    try:
+        driver_path = ChromeDriverManager().install()
+        print(f"[BOT] ChromeDriver path: {driver_path}")
+        save_status(phase="driver_installed")
+    except Exception as e:
+        print(f"[BOT] ChromeDriverManager failed: {e}")
+        save_status(phase=f"driver_install_failed: {str(e)[:80]}")
+        return
 
     options = Options()
     options.add_argument("--headless=new")
@@ -62,14 +84,16 @@ def bot_worker():
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
 
+    print("[BOT] Launching Chrome...")
+    save_status(phase="launching_chrome")
+
     try:
-        driver = webdriver.Chrome(
-            service=Service(ChromeDriverManager().install()), options=options
-        )
-        print("[BOT] Chrome driver ready")
+        driver = webdriver.Chrome(service=Service(driver_path), options=options)
+        print("[BOT] Chrome launched successfully")
+        save_status(phase="chrome_ready")
     except Exception as e:
-        print(f"[BOT] Driver failed: {e}")
-        save_status(phase=f"driver_error: {str(e)[:80]}")
+        print(f"[BOT] Chrome launch failed: {e}")
+        save_status(phase=f"chrome_failed: {str(e)[:80]}")
         return
 
     try:
@@ -77,10 +101,11 @@ def bot_worker():
             urls = get_urls()
             if not urls:
                 save_status(phase="no_urls")
+                print("[BOT] No URLs found, sleeping 5s")
                 time.sleep(5)
                 continue
 
-            print(f"[BOT] Starting cycle with {len(urls)} URLs")
+            print(f"[BOT] === New cycle: {len(urls)} URLs ===")
             save_status(phase="cycle_start")
             time.sleep(1)
 
@@ -106,7 +131,7 @@ def bot_worker():
                         counts[url] += 1
                         save_counts(counts)
                         save_status(current_url=url, phase="clicked")
-                        print(f"[BOT] Clicked button on {url}")
+                        print(f"[BOT] Clicked on {url}, total={counts[url]}")
                         time.sleep(1)
                     else:
                         save_counts(counts)
@@ -120,15 +145,16 @@ def bot_worker():
                     save_status(current_url=url, phase=f"error: {err}")
                     time.sleep(1)
 
-            print("[BOT] Cycle done, waiting 60s")
+            print("[BOT] Cycle done. Waiting 60s...")
             for remaining in range(60, 0, -1):
                 save_status(phase="waiting", countdown=remaining)
                 time.sleep(1)
 
     except Exception as e:
-        print(f"[BOT] Crashed: {e}")
+        print(f"[BOT] Loop crashed: {e}")
         save_status(phase=f"crashed: {str(e)[:80]}")
     finally:
+        print("[BOT] Quitting driver")
         driver.quit()
 
 
@@ -136,54 +162,62 @@ def ensure_bot_running():
     global _bot_thread
     with _bot_lock:
         if _bot_thread is None or not _bot_thread.is_alive():
-            print("[MAIN] Spawning bot thread")
+            print("[MAIN] Starting bot thread")
             _bot_thread = threading.Thread(target=bot_worker, daemon=True)
             _bot_thread.start()
+            print(f"[MAIN] Thread alive: {_bot_thread.is_alive()}")
 
 
-# --- Ensure bot is running ---
 ensure_bot_running()
 
 # --- UI ---
 st.set_page_config(page_title="Auto-Awakener Dashboard", page_icon="⚡", layout="centered")
 st.title("⚡ Auto-Awakener Status Dashboard")
-st.caption("Read-only dashboard. Refreshes every 3 seconds.")
+st.caption("Refreshes every 3 seconds.")
 
 urls = get_urls()
 status = load_status()
 counts = load_counts()
 
-phase = status.get("phase", "starting")
+phase = status.get("phase", "unknown")
 current_url = status.get("current_url")
 countdown = status.get("countdown", 0)
+
+# --- Raw phase always visible for debugging ---
+st.caption(f"🔧 Raw phase: `{phase}`")
 
 # --- Status Banner ---
 if phase == "visiting":
     st.info(f"🔍 Visiting: **{current_url}**")
 elif phase == "clicked":
-    st.success(f"✅ Button clicked on: **{current_url}**")
+    st.success(f"✅ Clicked on: **{current_url}**")
 elif phase == "no_button":
-    st.warning(f"🔘 No button found on: **{current_url}**")
+    st.warning(f"🔘 No button on: **{current_url}**")
 elif phase == "waiting":
-    st.info(f"⏳ Cycle complete. Next cycle in **{countdown}s**...")
+    st.info(f"⏳ Next cycle in **{countdown}s**...")
 elif phase == "cycle_start":
     st.info("🔄 Starting new cycle...")
 elif phase == "no_urls":
-    st.warning("⚠️ `website.txt` is empty or missing.")
+    st.warning("⚠️ website.txt is empty or missing.")
+elif phase == "thread_alive":
+    st.info("🧵 Thread started, initializing...")
+elif phase == "installing_driver":
+    st.info("📦 Installing ChromeDriver (one-time, may take 30s)...")
+elif phase == "driver_installed":
+    st.info("✅ ChromeDriver installed, launching Chrome...")
+elif phase == "launching_chrome":
+    st.info("🌐 Launching Chrome browser...")
+elif phase == "chrome_ready":
+    st.info("✅ Chrome ready, starting first cycle...")
 elif phase == "starting":
-    st.info("🚀 Bot is starting up, please wait...")
-elif phase.startswith("driver_error"):
-    st.error(f"🚫 Chrome driver failed: {phase}")
-elif phase.startswith("error:"):
-    st.error(f"⚠️ {phase} on **{current_url}**")
-elif phase.startswith("crashed"):
-    st.error(f"💀 {phase}")
+    st.info("🚀 Bot starting up...")
+elif "failed" in phase or "crashed" in phase or "error" in phase:
+    st.error(f"❌ {phase}")
 else:
-    st.info(f"🤖 Status: {phase}")
+    st.info(f"🤖 {phase}")
 
 st.divider()
 
-# --- Table ---
 if not urls:
     st.warning("⚠️ `website.txt` is missing or empty.")
 else:
@@ -207,8 +241,7 @@ else:
         }
     )
 
-    total = sum(r["Wake-up Clicks"] for r in rows)
-    st.metric("Total Wake-up Clicks", total)
+    st.metric("Total Wake-up Clicks", sum(r["Wake-up Clicks"] for r in rows))
 
 time.sleep(3)
 st.rerun()
