@@ -6,13 +6,12 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-# Import the autorefresh component
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIG ---
 COUNTS_FILE = "counts.json"
 WEBSITE_FILE = "website.txt"
-STATUS_FILE = "status.json" # Global status memory
+STATUS_FILE = "status.json"
 
 # --- PERSISTENCE ---
 def load_json(path):
@@ -25,10 +24,8 @@ def load_json(path):
 def save_json(path, data):
     with open(path, "w") as f: json.dump(data, f)
 
-# --- HELPER TO CLEAN NAME FOR STATUS ONLY ---
 def get_app_name(url):
-    name = url
-    return name
+    return url
 
 # --- BROWSER ENGINE ---
 @st.cache_resource
@@ -46,12 +43,15 @@ def get_driver():
 @st.fragment(run_every=2.0) 
 def bot_worker():
     global_status = load_json(STATUS_FILE)
-    last_run_time = global_status.get("last_run", 0)
+    
+    # 'next_run_at' represents your 'b' variable
+    next_run_at = global_status.get("next_run_at", 0)
     current_time = time.time()
     
-    if current_time - last_run_time > 60:
+    # Logic: if current time > b, then start the loop
+    if current_time >= next_run_at:
         if not os.path.exists(WEBSITE_FILE):
-            save_json(STATUS_FILE, {"state": "Error", "detail": "website.txt missing", "last_run": last_run_time})
+            save_json(STATUS_FILE, {"state": "Error", "detail": "website.txt missing", "next_run_at": next_run_at})
             return
 
         with open(WEBSITE_FILE, "r") as f:
@@ -60,10 +60,10 @@ def bot_worker():
         driver = get_driver()
         counts = load_json(COUNTS_FILE)
 
+        # Start processing all webs
         for url in urls:
             target = url if url.startswith("http") else f"https://{url}"
-            # Keep status message clean
-            save_json(STATUS_FILE, {"state": "Visiting", "detail": get_app_name(target), "last_run": last_run_time})
+            save_json(STATUS_FILE, {"state": "Visiting", "detail": get_app_name(target), "next_run_at": next_run_at})
             
             try:
                 driver.get(target)
@@ -76,14 +76,19 @@ def bot_worker():
             except:
                 continue
         
-        save_json(STATUS_FILE, {"state": "Waiting", "detail": "Cycle Complete. Resting...", "last_run": current_time})
+        # ALL WEBS VISITED: Note the time and update b = current + 60
+        new_b = time.time() + 60
+        save_json(STATUS_FILE, {
+            "state": "Waiting", 
+            "detail": f"Resting. Next cycle at {time.strftime('%H:%M:%S', time.localtime(new_b))}", 
+            "next_run_at": new_b
+        })
         st.rerun()
 
 # --- MAIN UI ---
 st.set_page_config(page_title="24/7 Awakener", page_icon="🤖")
 
-# --- AUTO-REFRESHER ---
-# Refreshes the dashboard every 5 seconds to show real-time progress
+# Auto-refresh UI every 5 seconds to trace the status
 st_autorefresh(interval=5000, key="datarefresh")
 
 st.title("🤖 Global Bot Dashboard")
@@ -110,7 +115,6 @@ if os.path.exists(WEBSITE_FILE):
     table_data = []
     for url in current_urls:
         click_count = counts.get(url, 0)
-        # Showing the full URL as stored in website.txt
         table_data.append({"URL": url, "Clicks": click_count})
     
     if table_data:
