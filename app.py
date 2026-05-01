@@ -1,127 +1,89 @@
 import streamlit as st
-import threading
 import time
-from datetime import datetime, timedelta
-from streamlit_autorefresh import st_autorefresh
 import os
-
 from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import WebDriverException
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
-# Constants
-VIRTUAL_START_STR = "2025-06-13 00:00:00"
-VIRTUAL_START = datetime.strptime(VIRTUAL_START_STR, "%Y-%m-%d %H:%M:%S")
-BOOT_TIME_FILE = "boot_time.txt"
-LOG_FILE = "logs.txt"
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Auto-Awakener Bot", page_icon="⚡")
 
-# Set or load the real boot time
-if os.path.exists(BOOT_TIME_FILE):
-    with open(BOOT_TIME_FILE, "r", encoding='utf-8') as f:
-        REAL_SERVER_START = datetime.strptime(f.read().strip(), "%Y-%m-%d %H:%M:%S")
-else:
-    REAL_SERVER_START = datetime.now()
-    with open(BOOT_TIME_FILE, "w", encoding='utf-8') as f:
-        f.write(REAL_SERVER_START.strftime("%Y-%m-%d %H:%M:%S"))
+# --- INITIALIZE SESSION STATE ---
+if 'click_counts' not in st.session_state:
+    st.session_state.click_counts = {}
 
-# ✅ Wake web background task using Selenium with proper log format
-def wake_web():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+def get_urls():
+    if not os.path.exists("website.txt"):
+        return []
+    with open("website.txt", "r") as f:
+        return [line.strip() for line in f if line.strip()]
 
+
+# --- MAIN INTERFACE ---
+st.title("⚡ Streamlit Auto-Awakener")
+st.write("The bot is running in a continuous loop. Refresh the page to see updated counts.")
+
+# Placeholders for live updates
+status_msg = st.empty()
+table_placeholder = st.empty()
+
+# --- BOT LOGIC ---
+options = Options()
+options.add_argument("--headless=new")
+options.add_argument("--no-sandbox")
+options.add_argument("--disable-dev-shm-usage")
+options.add_argument("--disable-gpu")
+options.add_argument(
+    "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+
+try:
+    # This loop starts immediately when the script runs
     while True:
-        log_lines = []
-        now_str = datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+        urls = get_urls()
 
-        try:
-            with open('weblist.txt', 'r', encoding='utf-8') as f:
-                urls = [line.strip() for line in f if line.strip()]
-                for url in urls:
-                    try:
-                        driver.get(url)
-                        log_line = f"{now_str} ✅ {url} → 200"
-                    except WebDriverException as e:
-                        log_line = f"{now_str} ❌ {url} → Error: {e}"
-                    print(log_line)
-                    log_lines.append(log_line)
-        except FileNotFoundError:
-            log_lines.append(f"{now_str} ❌ weblist.txt not found.")
+        if not urls:
+            status_msg.warning("website.txt is empty or missing. Please add URLs.")
+            time.sleep(5)
+            continue
 
-        if log_lines:
-            with open(LOG_FILE, "a", encoding='utf-8') as f:
-                for line in log_lines:
-                    f.write(line + "\n")
+        for url in urls:
+            full_url = url if url.startswith("http") else f"https://{url}"
+            status_msg.info(f"Checking: {full_url}...")
 
-        time.sleep(300) 
+            try:
+                driver.get(full_url)
+                # Minimum wait for the "Sleep" screen to render
+                time.sleep(3)
 
-# Start background thread only once
-if not hasattr(st, "_wake_thread_started"):
-    threading.Thread(target=wake_web, daemon=True).start()
-    st._wake_thread_started = True
+                # Check for the button
+                wake_button = driver.find_elements(By.XPATH, "//button[contains(., 'Yes, get this app back up!')]")
 
-# Auto-refresh every 1s
-st_autorefresh(interval=10000, key="refresh")
+                if wake_button:
+                    # Click and move on immediately
+                    driver.execute_script("arguments[0].click();", wake_button[0])
+                    st.session_state.click_counts[url] = st.session_state.click_counts.get(url, 0) + 1
+                else:
+                    if url not in st.session_state.click_counts:
+                        st.session_state.click_counts[url] = 0
 
-# Virtual time display
-elapsed_real = (datetime.now() - REAL_SERVER_START).total_seconds()
-current_virtual = VIRTUAL_START + timedelta(seconds=elapsed_real)
+            except Exception as e:
+                print(f"Error on {url}: {e}")
 
-st.title("Wake Web Streamlit")
-st.write("### Time running since:")
-st.code(current_virtual.strftime("%Y-%m-%d %H:%M:%S"))
+            # Update Table in real-time
+            table_placeholder.table([
+                {"Website": k, "Wake-up Clicks": v}
+                for k, v in st.session_state.click_counts.items()
+            ])
 
-# Load last 100 log lines from file
-if os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "r", encoding='utf-8') as f:
-        lines = f.readlines()
-        last_lines = lines[-100:]
-        st.write("### Request Log")
-        st.markdown(
-            f"""
-            <style>
-                .log-box::-webkit-scrollbar {{
-                    width: 10px;
-                }}
-                .log-box::-webkit-scrollbar-track {{
-                    background: #eee;
-                    border-radius: 5px;
-                }}
-                .log-box::-webkit-scrollbar-thumb {{
-                    background: #888;
-                    border-radius: 5px;
-                }}
-                .log-box::-webkit-scrollbar-thumb:hover {{
-                    background: #555;
-                }}
-                .log-box {{
-                    scrollbar-color: #888 #eee;
-                    scrollbar-width: thin;
-                }}
-            </style>
-            <div class="log-box" style="
-                background-color:#f9f9f9;
-                color:#000;
-                padding:10px;
-                border-radius:5px;
-                border:1px solid #ccc;
-                height:400px;
-                overflow:auto;
-                font-family: monospace;
-                white-space: pre-wrap;
-                width: 100%;">
-                {"<br>".join(line.strip() for line in last_lines)}
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
+        status_msg.success("Cycle complete. Restarting in 10 seconds...")
+        time.sleep(10)
 
-else:
-    st.write("### Request Log")
-    st.info("No logs yet.")
+except Exception as main_e:
+    st.error(f"Critical Bot Error: {main_e}")
+finally:
+    driver.quit()
