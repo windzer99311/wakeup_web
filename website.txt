@@ -1,5 +1,2 @@
-https://check-tip.streamlit.app/
-https://test-py.streamlit.app/
-https://tubesnag.streamlit.app/
-https://clientside-test.streamlit.app/
-https://yt-insta.streamlit.app/
+https://wake-up-the-alarm.streamlit.app/
+https://yt-save.streamlit.app/
