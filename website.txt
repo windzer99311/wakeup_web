@@ -1,2 +1,2 @@
 https://wake-up-the-alarm.streamlit.app/
-https://yt-save.streamlit.app/
+https://aternos-wakeup.streamlit.app/
