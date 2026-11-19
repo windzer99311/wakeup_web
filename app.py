@@ -15,7 +15,8 @@ WEBLIST_FILE = BASE_DIR / "weblist.txt"
 CLICK_FILE = BASE_DIR / "click_count.txt"
 
 CHECK_INTERVAL = 60          # seconds between each round
-REQUEST_TIMEOUT = 20         # seconds per request
+REQUEST_TIMEOUT = 30         # seconds per request
+RETRIES = 2                  # extra attempts on network errors/timeouts
 MAX_CONCURRENCY = 50         # parallel requests at once
 
 # NOTE: these two values come from your browser session. If wake-up (resume)
@@ -97,6 +98,17 @@ async def increment_click(site: str) -> None:
 
 
 # ---------------------------------------------------------------- core logic
+async def with_retry(fn, *args):
+    """Retry on network errors / timeouts (not on HTTP error codes)."""
+    for attempt in range(RETRIES + 1):
+        try:
+            return await fn(*args)
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt == RETRIES:
+                raise
+            await asyncio.sleep(2 * (attempt + 1))
+
+
 async def check_status(client: httpx.AsyncClient, site: str) -> int | None:
     r = await client.get(
         f"{site}/api/v2/app/status",
@@ -108,7 +120,10 @@ async def check_status(client: httpx.AsyncClient, site: str) -> int | None:
         },
     )
     r.raise_for_status()
-    return r.json().get("status")
+    try:
+        return r.json().get("status")
+    except ValueError:
+        raise RuntimeError(f"Non-JSON response (HTTP {r.status_code}): {r.text[:100]!r}")
 
 
 async def click_button(client: httpx.AsyncClient, site: str) -> bool:
@@ -133,20 +148,20 @@ async def process_site(client: httpx.AsyncClient, sem: asyncio.Semaphore, site: 
         info = {"status_code": None, "state": "unreachable", "woken": False,
                 "checked_at": time.time()}
         try:
-            code = await check_status(client, site)
+            code = await with_retry(check_status, client, site)
             info["status_code"] = code
             info["state"] = STATUS_NAMES.get(code, f"unknown({code})")
 
             if code == 12:                                  # sleeping -> wake it
-                if await click_button(client, site):
+                if await with_retry(click_button, client, site):
                     await increment_click(site)
                     info["woken"] = True
                     log.info("CLICKED wake-up button: %s", site)
                 else:
                     log.warning("Wake-up click failed (not 204): %s", site)
         except Exception as e:
-            info["error"] = str(e)
-            log.warning("Error on %s: %s", site, e)
+            info["error"] = f"{type(e).__name__}: {e}".rstrip(": ")
+            log.warning("Error on %s: %r", site, e)
         last_status[site] = info
 
 
