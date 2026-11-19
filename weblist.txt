@@ -1,1 +1,1 @@
-https://hangulpractice.streamlit.app/
+https://hangulpractice.streamlit.app
