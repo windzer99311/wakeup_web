@@ -4,6 +4,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from http.cookiejar import DefaultCookiePolicy
 from urllib.parse import urlparse
 
 import httpx
@@ -98,6 +99,15 @@ async def increment_click(site: str) -> None:
 
 
 # ---------------------------------------------------------------- core logic
+def make_client() -> httpx.AsyncClient:
+    """Client that never stores cookies, so each request behaves like a fresh
+    `requests.get/post` call. (Otherwise the cookie Streamlit sets on the status
+    GET gets sent together with our own _streamlit_csrf cookie -> 403.)"""
+    client = httpx.AsyncClient(verify=False, timeout=REQUEST_TIMEOUT)
+    client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
+    return client
+
+
 async def with_retry(fn, *args):
     """Retry on network errors / timeouts (not on HTTP error codes)."""
     for attempt in range(RETRIES + 1):
@@ -140,6 +150,8 @@ async def click_button(client: httpx.AsyncClient, site: str) -> bool:
         },
         cookies={"_streamlit_csrf": CSRF_COOKIE},
     )
+    if r.status_code != 204:
+        log.warning("resume %s -> HTTP %s %s", site, r.status_code, r.text[:200])
     return r.status_code == 204       # 204 == button clicked
 
 
@@ -170,7 +182,7 @@ async def run_round() -> None:
     if not sites:
         return
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
-    async with httpx.AsyncClient(verify=False, timeout=REQUEST_TIMEOUT) as client:
+    async with make_client() as client:
         await asyncio.gather(*(process_site(client, sem, s) for s in sites))
     log.info("Round done: %d sites checked", len(sites))
 
