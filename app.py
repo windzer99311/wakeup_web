@@ -74,7 +74,6 @@ def page_status_counts():
     c2.metric("Total status checks", int(df["Status checks"].sum()))
 
     st.dataframe(df, hide_index=True)
-    st.bar_chart(df.set_index("Website")["Status checks"])
 
 
 def page_click_count():
@@ -96,7 +95,6 @@ def page_click_count():
     c2.metric("Total clicks", int(df["Clicks"].sum()))
 
     st.dataframe(df, hide_index=True)
-    st.bar_chart(df.set_index("Website")["Clicks"])
 
 
 def page_add_website():
