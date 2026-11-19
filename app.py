@@ -1,231 +1,177 @@
-import asyncio
-import json
-import logging
-import time
-from contextlib import asynccontextmanager
-from pathlib import Path
-from http.cookiejar import DefaultCookiePolicy
-from urllib.parse import urlparse
+import os
 
-import httpx
-from fastapi import FastAPI
+import pandas as pd
+import requests
+import streamlit as st
 
-# ---------------------------------------------------------------- config
-BASE_DIR = Path(__file__).parent
-WEBLIST_FILE = BASE_DIR / "weblist.txt"
-CLICK_FILE = BASE_DIR / "click_count.txt"
+# Base URL of the FastAPI app (override with env var BASE_API or .streamlit/secrets.toml)
+BASE_API = os.environ.get("BASE_API", "https://windzer007.alwaysdata.net").rstrip("/")
+TIMEOUT = 20
 
-CHECK_INTERVAL = 60          # seconds between each round
-REQUEST_TIMEOUT = 30         # seconds per request
-RETRIES = 2                  # extra attempts on network errors/timeouts
-MAX_CONCURRENCY = 50         # parallel requests at once
+st.set_page_config(page_title="Keep-Alive Dashboard", page_icon="💤", layout="wide")
 
-# NOTE: these two values come from your browser session. If wake-up (resume)
-# stops returning 204, grab fresh values from the browser's network tab.
-CSRF_TOKEN = "bkZQYVV0RjN2RFEwVU1IY3lQSVJmVFV1V2Z2SmRUeWIndmgTEDIFRkVyJWEFFQcIPDxwMwMGIC8HXgJ6LGU+Fw=="
-CSRF_COOKIE = "MTc5NTA1NzIzNnxJbE5VUVRSamExWkhVVE5WZWs1dVVsSlZSbWhRWVRCV2MwOVhSbXhWYmxaaFZVUm9NRTFGWjNoU00xVTlJZz09fP2dNXprQkuQcqe-TFyfRNIdRv35_LchRdhDp_eMg_NU"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
-)
+# ---------------------------------------------------------------- API helpers
+def api_get(path: str):
+    """GET -> parsed JSON, or None (and an on-screen error) if the API is unreachable."""
+    try:
+        r = requests.get(f"{BASE_API}{path}", timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        st.error(f"Could not load `{path}` from {BASE_API}: {e}")
+        return None
 
-STATUS_NAMES = {
-    10: "crashed",
-    12: "sleeping",
-    5: "running",
-    0: "waking_up",
-    2: "waking_up",
+
+def error_text(r: requests.Response) -> str:
+    try:
+        return str(r.json().get("detail", r.text))
+    except ValueError:
+        return r.text[:200]
+
+
+def flash(kind: str, message: str):
+    """Show a message after st.rerun()."""
+    st.session_state["flash"] = (kind, message)
+
+
+def show_flash():
+    if "flash" in st.session_state:
+        kind, message = st.session_state.pop("flash")
+        getattr(st, kind)(message)
+
+
+def short(site: str) -> str:
+    return site.replace("https://", "").replace("http://", "")
+
+
+# ---------------------------------------------------------------- pages
+def page_status_counts():
+    st.header("📊 Status checks")
+    st.caption("How many times each website's status has been checked (one check per minute).")
+
+    counts = api_get("/count_status")
+    if counts is None:
+        return
+    live = api_get("/status") or {}
+
+    if not counts:
+        st.info("No websites yet. Add one from the **Add website** page.")
+        return
+
+    df = pd.DataFrame(
+        [
+            {
+                "Website": short(site),
+                "Status checks": n,
+                "Current state": live.get(site, {}).get("state", "not checked yet"),
+            }
+            for site, n in counts.items()
+        ]
+    )
+    c1, c2 = st.columns(2)
+    c1.metric("Websites", len(df))
+    c2.metric("Total status checks", int(df["Status checks"].sum()))
+
+    st.dataframe(df, hide_index=True)
+    st.bar_chart(df.set_index("Website")["Status checks"])
+
+
+def page_click_count():
+    st.header("🖱️ Wake-up clicks")
+    st.caption("How many times the wake-up button was clicked for each website.")
+
+    counts = api_get("/click_count")
+    if counts is None:
+        return
+    if not counts:
+        st.info("No websites yet. Add one from the **Add website** page.")
+        return
+
+    df = pd.DataFrame(
+        [{"Website": short(site), "Clicks": n} for site, n in counts.items()]
+    )
+    c1, c2 = st.columns(2)
+    c1.metric("Websites", len(df))
+    c2.metric("Total clicks", int(df["Clicks"].sum()))
+
+    st.dataframe(df, hide_index=True)
+    st.bar_chart(df.set_index("Website")["Clicks"])
+
+
+def page_add_website():
+    st.header("➕ Add website")
+    show_flash()
+
+    with st.form("add_form", clear_on_submit=True):
+        url = st.text_input(
+            "Website URL",
+            placeholder="https://example.streamlit.app  (trailing / is fine)",
+        )
+        submitted = st.form_submit_button("Add website")
+
+    if submitted:
+        if not url.strip():
+            st.warning("Please enter a URL.")
+        else:
+            try:
+                r = requests.post(f"{BASE_API}/websites", json={"url": url}, timeout=TIMEOUT)
+                if r.ok:
+                    data = r.json()
+                    if data["added"]:
+                        flash("success", f"Added {data['website']}")
+                    else:
+                        flash("info", f"{data['website']} is already in the list")
+                    st.rerun()
+                else:
+                    st.error(f"Could not add: {error_text(r)}")
+            except requests.RequestException as e:
+                st.error(f"API error: {e}")
+
+    st.subheader("Current websites")
+    sites = api_get("/websites")
+    if sites is not None:
+        st.write(f"{len(sites)} website(s)")
+        st.dataframe(pd.DataFrame({"Website": sites}), hide_index=True)
+
+
+def page_delete_website():
+    st.header("🗑️ Delete website")
+    show_flash()
+
+    sites = api_get("/websites")
+    if sites is None:
+        return
+    if not sites:
+        st.info("The list is empty.")
+        return
+
+    site = st.selectbox("Choose a website to delete", sites)
+    confirm = st.checkbox("Yes, delete this website")
+    if st.button("Delete", type="primary", disabled=not confirm):
+        try:
+            r = requests.delete(f"{BASE_API}/websites", params={"url": site}, timeout=TIMEOUT)
+            if r.ok:
+                flash("success", f"Deleted {site}")
+                st.rerun()
+            else:
+                st.error(f"Could not delete: {error_text(r)}")
+        except requests.RequestException as e:
+            st.error(f"API error: {e}")
+
+
+# ---------------------------------------------------------------- navigation
+PAGES = {
+    "📊 Status checks": page_status_counts,
+    "🖱️ Click count": page_click_count,
+    "➕ Add website": page_add_website,
+    "🗑️ Delete website": page_delete_website,
 }
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger("keepalive")
+st.sidebar.title("💤 Keep-Alive")
+choice = st.sidebar.radio("Page", list(PAGES), label_visibility="collapsed")
+if st.sidebar.button("🔄 Refresh"):
+    st.rerun()
+st.sidebar.caption(f"API: {BASE_API}")
 
-# ---------------------------------------------------------------- state
-last_status: dict[str, dict] = {}     # latest result per website
-file_lock = asyncio.Lock()
-
-
-# ---------------------------------------------------------------- helpers
-def normalize(line: str) -> str:
-    """'https://x.streamlit.app/', 'x.streamlit.app', 'HTTPS://X.streamlit.app/?a=1'
-    all become 'https://x.streamlit.app'."""
-    line = line.strip()
-    if not line.lower().startswith(("http://", "https://")):
-        line = "https://" + line
-    parsed = urlparse(line)
-    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-
-
-def load_websites() -> list[str]:
-    """Read weblist.txt (one site per line); ignores blanks, #comments, duplicates."""
-    if not WEBLIST_FILE.exists():
-        return []
-    seen, sites = set(), []
-    for raw in WEBLIST_FILE.read_text().splitlines():
-        raw = raw.strip()
-        if not raw or raw.startswith("#"):
-            continue
-        site = normalize(raw)
-        if site not in seen:
-            seen.add(site)
-            sites.append(site)
-    return sites
-
-
-def load_counts() -> dict[str, int]:
-    try:
-        raw = json.loads(CLICK_FILE.read_text() or "{}")
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-    merged: dict[str, int] = {}          # merge 'x/' and 'x' keys into one
-    for k, v in raw.items():
-        key = normalize(k)
-        merged[key] = merged.get(key, 0) + v
-    return merged
-
-
-def save_counts(counts: dict[str, int]) -> None:
-    tmp = CLICK_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(counts, indent=2))
-    tmp.replace(CLICK_FILE)           # atomic write
-
-
-async def increment_click(site: str) -> None:
-    async with file_lock:
-        counts = load_counts()
-        counts[site] = counts.get(site, 0) + 1
-        save_counts(counts)
-
-
-# ---------------------------------------------------------------- core logic
-def make_client() -> httpx.AsyncClient:
-    """Client that never stores cookies, so each request behaves like a fresh
-    `requests.get/post` call. (Otherwise the cookie Streamlit sets on the status
-    GET gets sent together with our own _streamlit_csrf cookie -> 403.)"""
-    client = httpx.AsyncClient(verify=False, timeout=REQUEST_TIMEOUT)
-    client.cookies.jar.set_policy(DefaultCookiePolicy(allowed_domains=[]))
-    return client
-
-
-async def with_retry(fn, *args):
-    """Retry on network errors / timeouts (not on HTTP error codes)."""
-    for attempt in range(RETRIES + 1):
-        try:
-            return await fn(*args)
-        except (httpx.TimeoutException, httpx.TransportError):
-            if attempt == RETRIES:
-                raise
-            await asyncio.sleep(2 * (attempt + 1))
-
-
-async def check_status(client: httpx.AsyncClient, site: str) -> int | None:
-    r = await client.get(
-        f"{site}/api/v2/app/status",
-        headers={
-            "sec-ch-ua-platform": '"Windows"',
-            "user-agent": USER_AGENT,
-            "accept": "application/json",
-            "priority": "u=1, i",
-        },
-    )
-    r.raise_for_status()
-    try:
-        return r.json().get("status")
-    except ValueError:
-        raise RuntimeError(f"Non-JSON response (HTTP {r.status_code}): {r.text[:100]!r}")
-
-
-async def click_button(client: httpx.AsyncClient, site: str) -> bool:
-    r = await client.post(
-        f"{site}/api/v2/app/resume",
-        headers={
-            "sec-ch-ua-platform": '"Windows"',
-            "x-csrf-token": CSRF_TOKEN,
-            "user-agent": USER_AGENT,
-            "accept": "application/json, text/plain, */*",
-            "sec-ch-ua-mobile": "?0",
-            "origin": site,
-            "priority": "u=1, i",
-        },
-        cookies={"_streamlit_csrf": CSRF_COOKIE},
-    )
-    if r.status_code != 204:
-        log.warning("resume %s -> HTTP %s %s", site, r.status_code, r.text[:200])
-    return r.status_code == 204       # 204 == button clicked
-
-
-async def process_site(client: httpx.AsyncClient, sem: asyncio.Semaphore, site: str) -> None:
-    async with sem:
-        info = {"status_code": None, "state": "unreachable", "woken": False,
-                "checked_at": time.time()}
-        try:
-            code = await with_retry(check_status, client, site)
-            info["status_code"] = code
-            info["state"] = STATUS_NAMES.get(code, f"unknown({code})")
-
-            if code == 12:                                  # sleeping -> wake it
-                if await with_retry(click_button, client, site):
-                    await increment_click(site)
-                    info["woken"] = True
-                    log.info("CLICKED wake-up button: %s", site)
-                else:
-                    log.warning("Wake-up click failed (not 204): %s", site)
-        except Exception as e:
-            info["error"] = f"{type(e).__name__}: {e}".rstrip(": ")
-            log.warning("Error on %s: %r", site, e)
-        last_status[site] = info
-
-
-async def run_round() -> None:
-    sites = load_websites()               # re-read each round: edits apply live
-    if not sites:
-        return
-    sem = asyncio.Semaphore(MAX_CONCURRENCY)
-    async with make_client() as client:
-        await asyncio.gather(*(process_site(client, sem, s) for s in sites))
-    log.info("Round done: %d sites checked", len(sites))
-
-
-async def scheduler() -> None:
-    while True:
-        started = time.monotonic()
-        try:
-            await run_round()
-        except Exception:
-            log.exception("Round crashed")
-        await asyncio.sleep(max(0, CHECK_INTERVAL - (time.monotonic() - started)))
-
-
-# ---------------------------------------------------------------- app
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    if not CLICK_FILE.exists():
-        CLICK_FILE.write_text("{}")
-    task = asyncio.create_task(scheduler())
-    yield
-    task.cancel()
-
-
-app = FastAPI(title="Streamlit Keep-Alive", lifespan=lifespan)
-
-
-@app.get("/")
-async def root():
-    return {"sites": len(load_websites()), "interval_seconds": CHECK_INTERVAL}
-
-
-@app.get("/click_count")
-async def click_count():
-    """{website: number_of_wake_up_clicks}; every site in weblist.txt is listed."""
-    counts = load_counts()
-    result = {site: counts.get(site, 0) for site in load_websites()}
-    for site, n in counts.items():        # keep history of removed sites too
-        result.setdefault(site, n)
-    return result
-
-
-@app.get("/status")
-async def status():
-    """Latest status seen for each website (bonus endpoint)."""
-    return last_status
+PAGES[choice]()
