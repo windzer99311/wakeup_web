@@ -4,6 +4,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI
@@ -45,10 +46,13 @@ file_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------- helpers
 def normalize(line: str) -> str:
-    line = line.strip().rstrip("/")
-    if not line.startswith(("http://", "https://")):
+    """'https://x.streamlit.app/', 'x.streamlit.app', 'HTTPS://X.streamlit.app/?a=1'
+    all become 'https://x.streamlit.app'."""
+    line = line.strip()
+    if not line.lower().startswith(("http://", "https://")):
         line = "https://" + line
-    return line
+    parsed = urlparse(line)
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
 
 def load_websites() -> list[str]:
@@ -69,9 +73,14 @@ def load_websites() -> list[str]:
 
 def load_counts() -> dict[str, int]:
     try:
-        return json.loads(CLICK_FILE.read_text() or "{}")
+        raw = json.loads(CLICK_FILE.read_text() or "{}")
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    merged: dict[str, int] = {}          # merge 'x/' and 'x' keys into one
+    for k, v in raw.items():
+        key = normalize(k)
+        merged[key] = merged.get(key, 0) + v
+    return merged
 
 
 def save_counts(counts: dict[str, int]) -> None:
